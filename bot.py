@@ -7,6 +7,7 @@ Includes a lightweight HTTP server to satisfy Render's port requirement.
 
 import os
 import json
+import asyncio
 import logging
 import urllib.request
 import urllib.parse
@@ -289,6 +290,13 @@ def main():
     if not GARRETT_BOT_TOKEN:
         logger.error("GARRETT_BOT_TOKEN not set!")
         return
+
+    # Python 3.14 removed asyncio.get_event_loop() auto-creation in the main
+    # thread, which python-telegram-bot relies on. Set a loop explicitly.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     
     # Start health server in background (satisfies Render port requirement)
     health_thread = threading.Thread(target=run_health_server, daemon=True)
