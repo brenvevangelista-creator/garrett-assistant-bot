@@ -2,6 +2,7 @@
 """
 Garrett Assistant Bot — Telegram interface to Hermes/Garrett.
 Provides business data, reminders, and conversational assistance.
+Includes a lightweight HTTP server to satisfy Render's port requirement.
 """
 
 import os
@@ -9,6 +10,8 @@ import json
 import logging
 import urllib.request
 import urllib.parse
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -31,6 +34,7 @@ GARRETT_BOT_TOKEN = os.environ.get("GARRETT_BOT_TOKEN", "")
 LOLO_BUDS_API_KEY = os.environ.get("LOLO_BUDS_FULL_READ_API_KEY", "")
 LOLO_BUDS_BASE = "https://lolobuds.vip/api"
 BREN_CHAT_ID = int(os.environ.get("BREN_TELEGRAM_CHAT_ID", "1608993620"))
+PORT = int(os.environ.get("PORT", "10000"))
 
 # ── Allowed users (Bren only for now) ────────────────────────────────────────
 ALLOWED_USERS = {1608993620}  # Bren's Telegram user ID
@@ -39,6 +43,25 @@ ALLOWED_USERS = {1608993620}  # Bren's Telegram user ID
 def is_authorized(user_id: int) -> bool:
     """Check if user is authorized."""
     return user_id in ALLOWED_USERS
+
+
+# ── Lightweight HTTP server for Render health checks ─────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": "ok", "bot": "garrett-assistant"}).encode())
+
+    def log_message(self, format, *args):
+        pass  # Suppress HTTP logs
+
+
+def run_health_server():
+    """Run health check server in background."""
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    logger.info(f"Health server on port {PORT}")
+    server.serve_forever()
 
 
 # ── Lolo Buds API helpers ────────────────────────────────────────────────────
@@ -62,15 +85,7 @@ def api_get(resource: str, params: dict = None) -> dict:
 
 
 def get_today_str() -> str:
-    """Get today's date string in YYYY-MM-DD format."""
     return datetime.now().strftime("%Y-%m-%d")
-
-
-def get_week_range() -> tuple:
-    """Get this week's date range (Monday to today)."""
-    today = datetime.now()
-    monday = today - timedelta(days=today.weekday())
-    return monday.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
 
 # ── Command handlers ─────────────────────────────────────────────────────────
@@ -83,13 +98,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
         "🤖 **Garrett Assistant**\n\n"
         "Hey Bren! I'm Garrett, your digital chief of staff.\n\n"
-        "📋 **Available Commands:**\n"
-        "/sales — Today's sales across all branches\n"
-        "/branches — List all branches\n"
+        "📋 **Commands:**\n"
+        "/sales — Today's sales\n"
+        "/branches — All branches\n"
         "/expenses — Recent expenses\n"
-        "/status — System status check\n"
+        "/status — System check\n"
         "/help — Show this message\n\n"
-        "Or just chat with me — I'll do my best to help!"
+        "Or just chat — I'll do my best to help!"
     )
     
     keyboard = ReplyKeyboardMarkup(
@@ -104,14 +119,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /help command."""
     if not is_authorized(update.effective_user.id):
         return
     await start(update, context)
 
 
 async def sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /sales command — fetch today's sales."""
     if not is_authorized(update.effective_user.id):
         await update.message.reply_text("⛔ Unauthorized.")
         return
@@ -132,7 +145,6 @@ async def sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 No sales recorded today.")
         return
     
-    # Group sales by branch
     branch_sales = {}
     for sale in rows:
         branch = sale.get("branch_name", "Unknown")
@@ -142,22 +154,17 @@ async def sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
         branch_sales[branch]["count"] += 1
         branch_sales[branch]["total"] += amount
     
-    # Format response
     lines = [f"📊 **Sales Today ({today})**\n"]
     grand_total = 0
     for branch, stats in sorted(branch_sales.items()):
         grand_total += stats["total"]
-        lines.append(
-            f"• **{branch}**: {stats['count']} orders — ₱{stats['total']:,.2f}"
-        )
+        lines.append(f"• **{branch}**: {stats['count']} orders — ₱{stats['total']:,.2f}")
     
     lines.append(f"\n**Grand Total: ₱{grand_total:,.2f}** ({total} orders)")
-    
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def branches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /branches command — list all branches."""
     if not is_authorized(update.effective_user.id):
         await update.message.reply_text("⛔ Unauthorized.")
         return
@@ -169,7 +176,6 @@ async def branches(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     rows = data.get("rows", [])
-    
     if not rows:
         await update.message.reply_text("📭 No branches found.")
         return
@@ -185,7 +191,6 @@ async def branches(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /expenses command — recent expenses."""
     if not is_authorized(update.effective_user.id):
         await update.message.reply_text("⛔ Unauthorized.")
         return
@@ -199,7 +204,6 @@ async def expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     rows = data.get("rows", [])
-    
     if not rows:
         await update.message.reply_text("📭 No expenses found.")
         return
@@ -216,12 +220,10 @@ async def expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /status command — system status check."""
     if not is_authorized(update.effective_user.id):
         await update.message.reply_text("⛔ Unauthorized.")
         return
     
-    # Check Lolo Buds API
     api_status = "🟢 Online"
     try:
         data = api_get("branches")
@@ -235,21 +237,18 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Garrett Bot**: 🟢 Running\n"
         f"• **Lolo Buds API**: {api_status}\n"
         f"• **Time**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"• **Uptime**: Active since last deploy\n"
     )
     
     await update.message.reply_text(status_msg, parse_mode="Markdown")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle regular text messages."""
     if not is_authorized(update.effective_user.id):
         await update.message.reply_text("⛔ Unauthorized.")
         return
     
     text = update.message.text.lower()
     
-    # Simple keyword-based responses
     if any(word in text for word in ["hello", "hi", "hey", "kumusta"]):
         response = "Hey Bren! 👋 How can I help you today?"
     elif any(word in text for word in ["sales", "kita", "benta"]):
@@ -280,7 +279,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors."""
     logger.error(f"Error: {context.error}")
     if update and update.message:
         await update.message.reply_text("❌ Something went wrong. Please try again.")
@@ -288,30 +286,27 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
-    """Start the bot."""
     if not GARRETT_BOT_TOKEN:
         logger.error("GARRETT_BOT_TOKEN not set!")
         return
+    
+    # Start health server in background (satisfies Render port requirement)
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
     
     logger.info("Starting Garrett Assistant Bot...")
     
     app = Application.builder().token(GARRETT_BOT_TOKEN).build()
     
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("sales", sales))
     app.add_handler(CommandHandler("branches", branches))
     app.add_handler(CommandHandler("expenses", expenses))
     app.add_handler(CommandHandler("status", status))
-    
-    # Message handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Error handler
     app.add_error_handler(error_handler)
     
-    # Start polling
     logger.info("Bot is running...")
     app.run_polling(drop_pending_updates=True)
 
